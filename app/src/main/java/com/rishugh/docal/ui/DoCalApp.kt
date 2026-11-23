@@ -32,6 +32,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -39,7 +40,9 @@ import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -71,8 +74,8 @@ private val DAY_HEADER_HEIGHT  = 56.dp
 private val RESIZE_HANDLE_ZONE = 18.dp
 private const val HOLD_DURATION_MS = 300L
 
-private const val INITIAL_PAGE = 5000
-private const val TOTAL_PAGES  = 10000
+private const val INITIAL_PAGE = 100
+private const val TOTAL_PAGES  = 200
 
 private val BgSurface     = Color(0xFFF8FAFC)
 private val CardWhite     = Color(0xFFFFFFFF)
@@ -149,9 +152,22 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
     val isDrawerOpen   by viewModel.isDrawerOpen.collectAsState()
     val selectedTaskId by viewModel.selectedTaskId.collectAsState()
 
-    val haptic  = LocalHapticFeedback.current
-    val density = LocalDensity.current
-    val scope   = rememberCoroutineScope()
+    val haptic             = LocalHapticFeedback.current
+    val density            = LocalDensity.current
+    val focusManager       = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val scope              = rememberCoroutineScope()
+
+    val dismissKeyboard: () -> Unit = {
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+    }
+
+    LaunchedEffect(isDrawerOpen) {
+        if (!isDrawerOpen) {
+            dismissKeyboard()
+        }
+    }
 
     val baseMonday = remember { LocalDate.now().with(DayOfWeek.MONDAY) }
     val pagerState = rememberPagerState(initialPage = INITIAL_PAGE) { TOTAL_PAGES }
@@ -296,6 +312,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
 
     // ── Drag Callbacks ──────────────────────────────────────────────────────
     val onMoveStart: (Task, Offset, Float, Boolean) -> Unit = { task, windowPos, grabOffsetY, fromDrawer ->
+        dismissKeyboard()
         if (!fromDrawer) {
             viewModel.selectTask(task.id)
         }
@@ -322,6 +339,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
     }
 
     val onResizeStart: (Task, Offset, DragMode) -> Unit = { task, windowPos, mode ->
+        dismissKeyboard()
         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
         viewModel.selectTask(task.id)
         drag = DragState(
@@ -471,19 +489,17 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
         drag = null
     }
 
-    // ── Drawer animation ────────────────────────────────────────────────────
-    val drawerOffset by animateDpAsState(
-        targetValue = if (isDrawerOpen) 0.dp else DRAWER_WIDTH + 20.dp,
+    // ── Drawer animation (GPU-accelerated via graphicsLayer, only composed when visible) ──
+    val drawerSlidePx = with(density) { (DRAWER_WIDTH + 20.dp).toPx() }
+    val drawerProgress by animateFloatAsState(
+        targetValue = if (isDrawerOpen) 1f else 0f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioNoBouncy,
             stiffness = Spring.StiffnessMedium
         ),
         label = "drawer"
     )
-    val scrimAlpha by animateFloatAsState(
-        targetValue = if (isDrawerOpen) 0.32f else 0f,
-        label = "scrim"
-    )
+    val scrimAlpha = drawerProgress * 0.32f
 
     val unscheduledCount = remember(tasks) { tasks.count { it.date == null } }
 
@@ -559,7 +575,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                     )
 
                     // Scrim when drawer is open
-                    if (scrimAlpha > 0.01f) {
+                    if (scrimAlpha > 0.005f) {
                         Box(
                             Modifier
                                 .fillMaxSize()
@@ -568,25 +584,36 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                                     indication = null,
                                     interactionSource = remember { MutableInteractionSource() }
                                 ) {
+                                    dismissKeyboard()
                                     viewModel.closeDrawer()
                                 }
                         )
                     }
 
-                    // Right-side Taskbar / Drawer
+                    // Right-side Taskbar / Drawer (kept mounted so dragging a task out of the drawer never cancels the gesture!)
                     TaskDrawerPanel(
                         tasks          = tasks,
                         dragState      = drag,
-                        onCloseDrawer  = viewModel::closeDrawer,
-                        onAddTaskModal = { activeSheetTask = Task(title = "", color = PALETTE.first()) },
+                        onCloseDrawer  = {
+                            dismissKeyboard()
+                            viewModel.closeDrawer()
+                        },
+                        onAddTaskModal = {
+                            dismissKeyboard()
+                            activeSheetTask = Task(title = "", color = PALETTE.first())
+                        },
                         onQuickAddTask = { title ->
                             viewModel.addTask(title = title, color = PALETTE.random())
                         },
                         onDeleteTask   = viewModel::deleteTask,
-                        onTaskTap      = { activeSheetTask = it },
+                        onTaskTap      = {
+                            dismissKeyboard()
+                            activeSheetTask = it
+                        },
                         onToggle       = viewModel::toggleTaskComplete,
                         onItemBounds   = { id, rect -> itemBoundsMap[id] = rect },
                         onMoveStart    = { task, pos ->
+                            dismissKeyboard()
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             val halfChipPx = with(density) { (HOUR_HEIGHT * task.durationMinutes / 120f).toPx() }
                             onMoveStart(task, pos, halfChipPx, true)
@@ -595,7 +622,9 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                         onDragEnd      = onDragEnd,
                         modifier       = Modifier
                             .align(Alignment.CenterEnd)
-                            .offset(x = drawerOffset)
+                            .graphicsLayer {
+                                translationX = (1f - drawerProgress) * drawerSlidePx
+                            }
                     )
                 }
             }
@@ -799,11 +828,18 @@ internal fun CalendarWeeklyPager(
     onDragEnd: () -> Unit
 ) {
     val today = remember { LocalDate.now() }
+    var lastViewportRect by remember { mutableStateOf<Rect?>(null) }
 
     BoxWithConstraints(
         Modifier
             .fillMaxSize()
-            .onGloballyPositioned { onViewportBounds(it.boundsInWindow()) }
+            .onGloballyPositioned {
+                val b = it.boundsInWindow()
+                if (b != lastViewportRect) {
+                    lastViewportRect = b
+                    onViewportBounds(b)
+                }
+            }
     ) {
         val dayWidth = ((maxWidth - TIME_COL_WIDTH) / 7f).coerceAtLeast(36.dp)
 
@@ -832,29 +868,35 @@ internal fun CalendarWeeklyPager(
                     )
                 }
 
-                Column(
+                Box(
                     Modifier
                         .fillMaxWidth()
                         .weight(1f)
                         .verticalScroll(vertScroll)
                 ) {
-                    for (h in 0..23) {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .height(HOUR_HEIGHT),
-                            contentAlignment = Alignment.TopEnd
-                        ) {
-                            if (h > 0) {
-                                Text(
-                                    text = HOUR_LABELS[h],
-                                    fontSize = 9.5.sp,
-                                    fontWeight = FontWeight.Medium,
-                                    color = TextMuted,
-                                    modifier = Modifier
-                                        .padding(end = 5.dp)
-                                        .offset(y = (-6).dp)
-                                )
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(HOUR_HEIGHT * 24)
+                    ) {
+                        for (h in 0..23) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .height(HOUR_HEIGHT),
+                                contentAlignment = Alignment.TopEnd
+                            ) {
+                                if (h > 0) {
+                                    Text(
+                                        text = HOUR_LABELS[h],
+                                        fontSize = 9.5.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = TextMuted,
+                                        modifier = Modifier
+                                            .padding(end = 5.dp)
+                                            .offset(y = (-6).dp)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1600,6 +1642,8 @@ private fun DrawerTaskCard(
 
     var lastCardWinPos by remember { mutableStateOf(Offset.Zero) }
 
+    var lastCardBounds by remember { mutableStateOf<Rect?>(null) }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1613,25 +1657,22 @@ private fun DrawerTaskCard(
             )
             .onGloballyPositioned {
                 cardCoords = it
-                onBounds(it.boundsInWindow())
+                val b = it.boundsInWindow()
+                if (b != lastCardBounds) {
+                    lastCardBounds = b
+                    onBounds(b)
+                }
             }
             .pointerInput(task.id) {
                 detectDragGesturesAfterLongPress(
                     onDragStart = { local ->
                         val coords = cardCoords?.takeIf { it.isAttached }
                         val winPos = coords?.localToWindow(local) ?: local
-                        lastCardWinPos = winPos
                         updatedOnMoveStart(updatedTask, winPos)
                     },
-                    onDrag = { change, _ ->
+                    onDrag = { change, amount ->
                         change.consume()
-                        val coords = cardCoords?.takeIf { it.isAttached }
-                        if (coords != null) {
-                            val curWin = coords.localToWindow(change.position)
-                            val delta = curWin - lastCardWinPos
-                            lastCardWinPos = curWin
-                            updatedOnDragDelta(delta)
-                        }
+                        updatedOnDragDelta(amount)
                     },
                     onDragEnd = { updatedOnDragEnd() },
                     onDragCancel = { updatedOnDragEnd() }
@@ -1956,24 +1997,26 @@ private fun MinimalTaskSheet(
                         }
                     }
 
-                    Button(
-                        onClick = {
-                            if (title.isNotBlank()) {
-                                onSave(title.trim(), desc.trim(), color, duration, isCompleted)
-                            }
-                        },
-                        enabled = title.isNotBlank(),
-                        colors = ButtonDefaults.buttonColors(containerColor = activeColor),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
-                        modifier = Modifier.height(36.dp)
-                    ) {
-                        Text(
-                            if (isNew) "Add" else "Save",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
+                Button(
+                    onClick = {
+                        val finalTitle = title.trim().ifEmpty { "New Task" }
+                        onSave(finalTitle, desc.trim(), color, duration, isCompleted)
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = activeColor,
+                        contentColor = Color.White
+                    ),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
+                    modifier = Modifier.height(36.dp)
+                ) {
+                    Text(
+                        if (isNew) "Add" else "Save",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White
+                    )
+                }
                 }
             }
         }
