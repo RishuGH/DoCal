@@ -18,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -30,6 +31,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.LayoutCoordinates
@@ -64,6 +66,7 @@ import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -125,6 +128,28 @@ private val PALETTE = listOf(
 internal enum class DragMode { MOVE, RESIZE_TOP, RESIZE_BOTTOM }
 
 @Immutable
+private data class PositionedTask(
+    val task: Task,
+    val originalIndex: Int,
+    val displayDate: LocalDate,
+    val displayTime: LocalTime,
+    val displayDur: Int,
+    val dayOff: Int,
+    val startMin: Int,
+    val endMin: Int,
+    val clusterStartMin: Int,
+    val clusterEndMin: Int,
+    val isMovingThis: Boolean,
+    val isThisDragging: Boolean
+)
+
+@Immutable
+private data class ChipClusterMeta(
+    val clusterSize: Int,
+    val indexInCluster: Int
+)
+
+@Immutable
 internal data class DragState(
     val task: Task,
     val mode: DragMode,
@@ -169,9 +194,11 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
         }
     }
 
-    // Single shared verticalScroll and smooth Animatable horizontal slide offset (Zero Pager overhead!)
+    // Single shared verticalScroll, horizontal zoom & pan, and smooth Animatable week slide offset
     val vertScroll = rememberScrollState(initial = with(density) { (HOUR_HEIGHT * 8).roundToPx() })
     val weekSlideOffsetPx = remember { Animatable(0f) }
+    var zoomScale by remember { mutableFloatStateOf(1f) }
+    var horizPanPx by remember { mutableFloatStateOf(0f) }
 
     fun animateToWeek(targetMonday: LocalDate, dir: Int) {
         scope.launch {
@@ -192,7 +219,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
 
     var activeSheetTask by remember { mutableStateOf<Task?>(null) }
 
-    // ── Stable, Direct Snap Helper ──────────────────────────────────────────
+    // ── Stable, Direct Snap Helper (Zoom & Pan Aware!) ──────────────────────
     fun snapToGrid(windowPos: Offset, grabOffsetY: Float, currentMonday: LocalDate = weekStart): Pair<LocalDate?, LocalTime?> {
         val vp = viewportBounds ?: return null to null
         val gutterPx  = with(density) { TIME_COL_WIDTH.toPx() }
@@ -210,15 +237,17 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
             return null to null
         }
 
-        val gridW = (gridRight - gridLeft).coerceAtLeast(1f)
-        val dayPx = gridW / 7f
+        val viewportW = (gridRight - gridLeft).coerceAtLeast(1f)
+        val totalGridW = viewportW * zoomScale
+        val dayPx = totalGridW / 7f
 
-        val relX = (windowPos.x - gridLeft).coerceIn(0f, gridW - 1f)
+        val relXInViewport = (windowPos.x - gridLeft).coerceIn(0f, viewportW - 1f)
+        val relXInContent = (relXInViewport + horizPanPx).coerceIn(0f, totalGridW - 1f)
         val relYInScroll = (windowPos.y - gridTop) + vertScroll.value - grabOffsetY
         val maxScrollY = hourPx * 24f - 1f
         val clampedY = relYInScroll.coerceIn(0f, maxScrollY)
 
-        val dayIdx = (relX / dayPx).toInt().coerceIn(0, 6)
+        val dayIdx = (relXInContent / dayPx).toInt().coerceIn(0, 6)
         val rawMinutes = (clampedY / hourPx * 60f).roundToInt()
         val snappedTotalMin = ((rawMinutes / 15f).roundToInt() * 15).coerceIn(0, 23 * 60 + 45)
         val h = snappedTotalMin / 60
@@ -227,7 +256,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
         return currentMonday.plusDays(dayIdx.toLong()) to LocalTime.of(h, m)
     }
 
-    // ── Smooth Google Calendar-Style Edge Week Switching & Vertical Auto-Scroll ──
+    // ── Smooth Google Calendar-Style Edge Week Switching & Vertical/Horizontal Auto-Scroll ──
     val isDraggingMove = drag?.mode == DragMode.MOVE && drag?.isOverDrawer == false
     LaunchedEffect(isDraggingMove) {
         if (isDraggingMove) {
@@ -246,30 +275,27 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                 val gridRight = vp.right
                 val gridTop = vp.top + headerPx
                 val gridBottom = vp.bottom
+                val viewportW = (gridRight - gridLeft).coerceAtLeast(1f)
+                val maxPanPx = (viewportW * (zoomScale - 1f)).coerceAtLeast(0f)
 
                 // 1. Vertical auto-scroll near top or bottom
                 val vZonePx = with(density) { 54.dp.toPx() }
                 val maxVSpeed = with(density) { 11.dp.toPx() }
                 val wy = current.windowPos.y
-                var didVScroll = false
+                var didScrollOrPan = false
                 if (wy in gridTop..(gridTop + vZonePx) && vertScroll.value > 0) {
                     val ratio = 1f - ((wy - gridTop) / vZonePx).coerceIn(0f, 1f)
                     vertScroll.scrollBy(-maxVSpeed * ratio)
-                    didVScroll = true
+                    didScrollOrPan = true
                 } else if (wy in (gridBottom - vZonePx)..gridBottom && vertScroll.value < vertScroll.maxValue) {
                     val ratio = 1f - ((gridBottom - wy) / vZonePx).coerceIn(0f, 1f)
                     vertScroll.scrollBy(maxVSpeed * ratio)
-                    didVScroll = true
-                }
-                if (didVScroll) {
-                    val (nd, nt) = snapToGrid(current.windowPos, current.grabOffsetY)
-                    if (nd != null && nt != null) {
-                        drag = current.copy(snappedDate = nd, snappedTime = nt)
-                    }
+                    didScrollOrPan = true
                 }
 
-                // 2. Smooth horizontal week switching near left or right edge
+                // 2. Smooth horizontal pan (when zoomed in) & week switching near left or right edge
                 val hZonePx = with(density) { 36.dp.toPx() }
+                val maxHSpeed = with(density) { 10.dp.toPx() }
                 val wx = current.windowPos.x
                 val dir = when {
                     wx <= gridLeft + hZonePx -> -1
@@ -277,7 +303,17 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                     else -> 0
                 }
 
-                if (dir != 0 && !weekSlideOffsetPx.isRunning) {
+                if (dir == -1 && horizPanPx > 0.5f) {
+                    val ratio = 1f - ((wx - gridLeft) / hZonePx).coerceIn(0f, 1f)
+                    horizPanPx = (horizPanPx - maxHSpeed * ratio).coerceIn(0f, maxPanPx)
+                    didScrollOrPan = true
+                    edgeHoldMs = 0L
+                } else if (dir == 1 && horizPanPx < maxPanPx - 0.5f) {
+                    val ratio = 1f - ((gridRight - wx) / hZonePx).coerceIn(0f, 1f)
+                    horizPanPx = (horizPanPx + maxHSpeed * ratio).coerceIn(0f, maxPanPx)
+                    didScrollOrPan = true
+                    edgeHoldMs = 0L
+                } else if (dir != 0 && !weekSlideOffsetPx.isRunning) {
                     if (dir == lastEdgeDir) {
                         edgeHoldMs += 24L
                     } else {
@@ -289,6 +325,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                         edgeHoldMs = -240L
                         val targetMonday = weekStart.plusWeeks(dir.toLong())
                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        if (dir == 1) horizPanPx = 0f else horizPanPx = maxPanPx
                         animateToWeek(targetMonday, dir)
 
                         val latest = drag ?: break
@@ -301,6 +338,13 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                 } else {
                     lastEdgeDir = 0
                     edgeHoldMs = 0L
+                }
+
+                if (didScrollOrPan) {
+                    val (nd, nt) = snapToGrid(current.windowPos, current.grabOffsetY)
+                    if (nd != null && nt != null) {
+                        drag = current.copy(snappedDate = nd, snappedTime = nt)
+                    }
                 }
             }
         }
@@ -512,6 +556,11 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                         weekStart        = weekStart,
                         unscheduledCount = unscheduledCount,
                         isDrawerOpen     = isDrawerOpen,
+                        zoomScale        = zoomScale,
+                        onResetZoom      = {
+                            zoomScale = 1f
+                            horizPanPx = 0f
+                        },
                         onPrev           = { animateToWeek(weekStart.minusWeeks(1), -1) },
                         onNext           = { animateToWeek(weekStart.plusWeeks(1), 1) },
                         onToday          = {
@@ -535,6 +584,12 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                         tasks             = tasks,
                         weekStart         = weekStart,
                         weekSlideOffsetPx = weekSlideOffsetPx.value,
+                        zoomScale         = zoomScale,
+                        horizPanPx        = horizPanPx,
+                        onZoomPanChange   = { newScale, newPan ->
+                            zoomScale = newScale
+                            horizPanPx = newPan
+                        },
                         vertScroll        = vertScroll,
                         selectedTaskId    = selectedTaskId,
                         dragState         = drag,
@@ -696,6 +751,8 @@ private fun CalendarTopBar(
     weekStart: LocalDate,
     unscheduledCount: Int,
     isDrawerOpen: Boolean,
+    zoomScale: Float,
+    onResetZoom: () -> Unit,
     onPrev: () -> Unit,
     onNext: () -> Unit,
     onToday: () -> Unit,
@@ -718,10 +775,31 @@ private fun CalendarTopBar(
                         text = monthText,
                         fontWeight = FontWeight.Bold,
                         fontSize = 18.sp,
-                        color = TextPrimary
+                        color = TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 },
                 actions = {
+                    if (zoomScale > 1.05f) {
+                        TextButton(
+                            onClick = onResetZoom,
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                            modifier = Modifier.height(30.dp),
+                            colors = ButtonDefaults.textButtonColors(
+                                containerColor = Color(0xFFF1F5F9),
+                                contentColor = TextPrimary
+                            )
+                        ) {
+                            Text(
+                                "${((zoomScale * 10f).roundToInt() / 10f)}x · 7d",
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 11.sp
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+                    }
                     IconButton(
                         onClick = onPrev,
                         modifier = Modifier.size(34.dp)
@@ -799,6 +877,9 @@ internal fun CalendarWeeklyView(
     tasks: List<Task>,
     weekStart: LocalDate,
     weekSlideOffsetPx: Float,
+    zoomScale: Float,
+    horizPanPx: Float,
+    onZoomPanChange: (Float, Float) -> Unit,
     vertScroll: ScrollState,
     selectedTaskId: String?,
     dragState: DragState?,
@@ -813,10 +894,19 @@ internal fun CalendarWeeklyView(
     onDragEnd: () -> Unit
 ) {
     val today = remember { LocalDate.now() }
+    val density = LocalDensity.current
     val screenWidthDp = LocalConfiguration.current.screenWidthDp.dp
-    val dayWidth = remember(screenWidthDp) {
+    val baseDayWidth = remember(screenWidthDp) {
         ((screenWidthDp - TIME_COL_WIDTH) / 7f).coerceAtLeast(36.dp)
     }
+    val dayWidth = baseDayWidth * zoomScale
+    val viewportGridWidthPx = with(density) { (baseDayWidth * 7f).toPx() }
+    val gutterWidthPx = with(density) { TIME_COL_WIDTH.toPx() }
+
+    val updatedZoomScale by rememberUpdatedState(zoomScale)
+    val updatedHorizPanPx by rememberUpdatedState(horizPanPx)
+    val updatedOnZoomPanChange by rememberUpdatedState(onZoomPanChange)
+    val updatedOnSwipeWeek by rememberUpdatedState(onSwipeWeek)
 
     var lastViewportRect by remember { mutableStateOf<Rect?>(null) }
     val weekEnd = remember(weekStart) { weekStart.plusDays(6) }
@@ -859,16 +949,94 @@ internal fun CalendarWeeklyView(
                     onViewportBounds(b)
                 }
             }
-            .pointerInput(weekStart, dragState == null) {
+            // 2-Finger Horizontal Pinch-to-Zoom (intercepted in Initial pass when 2+ fingers are down)
+            .pointerInput(viewportGridWidthPx) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                    var prevPinchDist = 0f
+                    var prevCentroidX = 0f
+                    var isPinching = false
+
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val pressed = event.changes.filter { it.pressed }
+                        if (pressed.isEmpty()) break
+
+                        if (pressed.size >= 2) {
+                            val p1 = pressed[0].position
+                            val p2 = pressed[1].position
+                            // Emphasize horizontal finger separation so horizontal 2-finger pinch zooms responsively
+                            val dx = abs(p1.x - p2.x)
+                            val dy = abs(p1.y - p2.y)
+                            val dist = hypot(dx * 1.4f, dy * 0.6f).coerceAtLeast(12f)
+                            val centroidX = ((p1.x + p2.x) * 0.5f - gutterWidthPx)
+                                .coerceIn(0f, viewportGridWidthPx)
+
+                            if (!isPinching) {
+                                isPinching = true
+                                prevPinchDist = dist
+                                prevCentroidX = centroidX
+                            } else {
+                                val zoomRatio = (dist / prevPinchDist).coerceIn(0.75f, 1.35f)
+                                val oldScale = updatedZoomScale
+                                val newScale = (oldScale * zoomRatio).coerceIn(1f, 5.5f)
+                                val actualRatio = newScale / oldScale
+                                val centroidDeltaX = centroidX - prevCentroidX
+
+                                val maxPan = (viewportGridWidthPx * (newScale - 1f)).coerceAtLeast(0f)
+                                val contentX = updatedHorizPanPx + prevCentroidX
+                                val newPan = (contentX * actualRatio - centroidX).coerceIn(0f, maxPan)
+
+                                if (abs(newScale - oldScale) > 0.002f || abs(centroidDeltaX) > 0.5f) {
+                                    updatedOnZoomPanChange(newScale, newPan)
+                                }
+                                prevPinchDist = dist
+                                prevCentroidX = centroidX
+                            }
+                            // Consume 2-finger events so 1-finger scroll / task hold doesn't trigger
+                            pressed.forEach { it.consume() }
+                        } else {
+                            isPinching = false
+                        }
+                    }
+                }
+            }
+            // 1-Finger Horizontal Pan (when zoomed in) or Week Swipe (at 1x or past edges)
+            .pointerInput(weekStart, dragState == null, viewportGridWidthPx) {
                 if (dragState != null) return@pointerInput
                 detectHorizontalDragGestures(
                     onDragStart = { horizSwipeAccum = 0f },
-                    onHorizontalDrag = { _, dragAmount ->
-                        horizSwipeAccum += dragAmount
+                    onHorizontalDrag = { change, dragAmount ->
+                        val scale = updatedZoomScale
+                        if (scale > 1.01f) {
+                            val maxPan = (viewportGridWidthPx * (scale - 1f)).coerceAtLeast(0f)
+                            val curPan = updatedHorizPanPx
+                            val proposedPan = curPan - dragAmount
+                            if (proposedPan in 0f..maxPan) {
+                                change.consume()
+                                updatedOnZoomPanChange(scale, proposedPan)
+                                horizSwipeAccum = 0f
+                            } else {
+                                val clampedPan = proposedPan.coerceIn(0f, maxPan)
+                                if (clampedPan != curPan) {
+                                    updatedOnZoomPanChange(scale, clampedPan)
+                                }
+                                horizSwipeAccum += dragAmount
+                            }
+                        } else {
+                            horizSwipeAccum += dragAmount
+                        }
                     },
                     onDragEnd = {
-                        if (horizSwipeAccum > 90f) onSwipeWeek(-1)
-                        else if (horizSwipeAccum < -90f) onSwipeWeek(1)
+                        val scale = updatedZoomScale
+                        val maxPan = (viewportGridWidthPx * (scale - 1f)).coerceAtLeast(0f)
+                        if (horizSwipeAccum > 95f) {
+                            updatedOnZoomPanChange(scale, maxPan)
+                            updatedOnSwipeWeek(-1)
+                        } else if (horizSwipeAccum < -95f) {
+                            updatedOnZoomPanChange(scale, 0f)
+                            updatedOnSwipeWeek(1)
+                        }
                         horizSwipeAccum = 0f
                     }
                 )
@@ -898,60 +1066,69 @@ internal fun CalendarWeeklyView(
                 )
             }
 
-            Row(
+            Box(
                 Modifier
-                    .fillMaxWidth()
-                    .graphicsLayer { translationX = weekSlideOffsetPx }
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clipToBounds()
             ) {
-                for (i in 0..6) {
-                    val date = weekStart.plusDays(i.toLong())
-                    val isToday = date == today
+                Row(
+                    Modifier
+                        .wrapContentWidth(Alignment.Start, unbounded = true)
+                        .width(dayWidth * 7)
+                        .fillMaxHeight()
+                        .graphicsLayer { translationX = weekSlideOffsetPx - horizPanPx }
+                ) {
+                    for (i in 0..6) {
+                        val date = weekStart.plusDays(i.toLong())
+                        val isToday = date == today
 
-                    Column(
-                        Modifier
-                            .width(dayWidth)
-                            .fillMaxHeight()
-                            .background(if (isToday) BrandLight.copy(alpha = 0.4f) else Color.Transparent)
-                            .padding(vertical = 4.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            text = date.dayOfWeek.name.take(3),
-                            style = TextStyle(
-                                fontSize = 10.sp,
-                                lineHeight = 12.sp,
-                                fontWeight = if (isToday) FontWeight.Bold else FontWeight.SemiBold,
-                                color = if (isToday) BrandPrimary else TextSecondary,
-                                textAlign = TextAlign.Center,
-                                platformStyle = PlatformTextStyle(includeFontPadding = false)
-                            )
-                        )
-                        Spacer(Modifier.height(3.dp))
-                        Box(
+                        Column(
                             Modifier
-                                .size(28.dp)
-                                .background(
-                                    if (isToday) BrandPrimary else Color.Transparent,
-                                    CircleShape
-                                ),
-                            contentAlignment = Alignment.Center
+                                .width(dayWidth)
+                                .fillMaxHeight()
+                                .background(if (isToday) BrandLight.copy(alpha = 0.4f) else Color.Transparent)
+                                .padding(vertical = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
                         ) {
                             Text(
-                                text = date.dayOfMonth.toString(),
+                                text = date.dayOfWeek.name.take(3),
                                 style = TextStyle(
-                                    fontSize = 13.sp,
-                                    lineHeight = 13.sp,
+                                    fontSize = 10.sp,
+                                    lineHeight = 12.sp,
                                     fontWeight = if (isToday) FontWeight.Bold else FontWeight.SemiBold,
-                                    color = if (isToday) Color.White else TextPrimary,
+                                    color = if (isToday) BrandPrimary else TextSecondary,
                                     textAlign = TextAlign.Center,
-                                    platformStyle = PlatformTextStyle(includeFontPadding = false),
-                                    lineHeightStyle = LineHeightStyle(
-                                        alignment = LineHeightStyle.Alignment.Center,
-                                        trim = LineHeightStyle.Trim.Both
-                                    )
+                                    platformStyle = PlatformTextStyle(includeFontPadding = false)
                                 )
                             )
+                            Spacer(Modifier.height(3.dp))
+                            Box(
+                                Modifier
+                                    .size(28.dp)
+                                    .background(
+                                        if (isToday) BrandPrimary else Color.Transparent,
+                                        CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = date.dayOfMonth.toString(),
+                                    style = TextStyle(
+                                        fontSize = 13.sp,
+                                        lineHeight = 13.sp,
+                                        fontWeight = if (isToday) FontWeight.Bold else FontWeight.SemiBold,
+                                        color = if (isToday) Color.White else TextPrimary,
+                                        textAlign = TextAlign.Center,
+                                        platformStyle = PlatformTextStyle(includeFontPadding = false),
+                                        lineHeightStyle = LineHeightStyle(
+                                            alignment = LineHeightStyle.Alignment.Center,
+                                            trim = LineHeightStyle.Trim.Both
+                                        )
+                                    )
+                                )
+                            }
                         }
                     }
                 }
@@ -987,187 +1164,298 @@ internal fun CalendarWeeklyView(
                     }
                 }
 
-                // Right 7-Day Grid + Scheduled Events
+                // Right Clipped Viewport containing the Zoomable 7-Day Grid + Scheduled Events
                 Box(
                     Modifier
-                        .width(dayWidth * 7)
+                        .weight(1f)
                         .fillMaxHeight()
-                        .graphicsLayer { translationX = weekSlideOffsetPx }
-                        .pointerInput(Unit) {
-                            detectTapGestures(onTap = { onEmptyTap() })
-                        }
+                        .clipToBounds()
                 ) {
-                    val todayIdx = ChronoUnit.DAYS.between(weekStart, today).toInt()
-                    val dashEffect = remember { PathEffect.dashPathEffect(floatArrayOf(5f, 5f)) }
-
-                    Canvas(Modifier.fillMaxSize()) {
-                        val dh = size.height / 24f
-                        val dw = size.width / 7f
-
-                        if (todayIdx in 0..6) {
-                            drawRect(
-                                color = BrandLight.copy(alpha = 0.22f),
-                                topLeft = Offset(todayIdx * dw, 0f),
-                                size = androidx.compose.ui.geometry.Size(dw, size.height)
-                            )
-                        }
-
-                        drawLine(GridLineColor, Offset(0f, 0f), Offset(0f, size.height), 1.5f)
-
-                        for (i in 0..23) {
-                            if (i > 0) {
-                                drawLine(GridLineColor, Offset(0f, i * dh), Offset(size.width, i * dh), 1.2f)
+                    Box(
+                        Modifier
+                            .wrapContentWidth(Alignment.Start, unbounded = true)
+                            .width(dayWidth * 7)
+                            .fillMaxHeight()
+                            .graphicsLayer { translationX = weekSlideOffsetPx - horizPanPx }
+                            .pointerInput(Unit) {
+                                detectTapGestures(onTap = { onEmptyTap() })
                             }
-                            val y = (i + 0.5f) * dh
-                            drawLine(
-                                GridLineColor.copy(alpha = 0.65f),
-                                Offset(0f, y),
-                                Offset(size.width, y),
-                                1f,
-                                pathEffect = dashEffect
-                            )
-                        }
-                        for (i in 1..6) {
-                            drawLine(GridLineColor, Offset(i * dw, 0f), Offset(i * dw, size.height), 1.2f)
-                        }
-                    }
+                    ) {
+                        val todayIdx = ChronoUnit.DAYS.between(weekStart, today).toInt()
+                        val dashEffect = remember { PathEffect.dashPathEffect(floatArrayOf(5f, 5f)) }
 
-                    // ── Scheduled Events ────────────────────────────────────
-                    weekTasks.forEach { task ->
-                        key(task.id) {
-                            val isThisDragging = dragState?.task?.id == task.id
-                            val isMovingThis = isThisDragging && dragState.mode == DragMode.MOVE
-                            val showHandles = (selectedTaskId == task.id && !isThisDragging) ||
-                                (isThisDragging && (dragState.mode == DragMode.RESIZE_TOP || dragState.mode == DragMode.RESIZE_BOTTOM))
+                        Canvas(Modifier.fillMaxSize()) {
+                            val dh = size.height / 24f
+                            val dw = size.width / 7f
 
-                            val displayDate = if (isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM)) {
-                                dragState?.snappedDate ?: task.date
-                            } else {
-                                task.date
+                            if (todayIdx in 0..6) {
+                                drawRect(
+                                    color = BrandLight.copy(alpha = 0.22f),
+                                    topLeft = Offset(todayIdx * dw, 0f),
+                                    size = androidx.compose.ui.geometry.Size(dw, size.height)
+                                )
                             }
 
-                            val displayTime = if (isThisDragging && dragState?.mode == DragMode.RESIZE_TOP) {
-                                dragState?.snappedTime ?: task.time
-                            } else {
-                                task.time
-                            }
+                            drawLine(GridLineColor, Offset(0f, 0f), Offset(0f, size.height), 1.5f)
 
-                            if (displayDate != null && displayTime != null) {
-                                val rawDayOff = ChronoUnit.DAYS.between(weekStart, displayDate).toInt()
-                                if (rawDayOff in 0..6 || isMovingThis) {
-                                    val displayDur = if (isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM)) {
-                                        dragState?.snappedDuration ?: task.durationMinutes
-                                    } else {
-                                        task.durationMinutes
-                                    }
-
-                                    val dayOff = rawDayOff.coerceIn(0, 6)
-                                    val yFrac = displayTime.hour + displayTime.minute / 60f
-                                    val yDp   = HOUR_HEIGHT * yFrac
-                                    val hDp   = (HOUR_HEIGHT * displayDur / 60f).coerceAtLeast(20.dp)
-
-                                    CalendarEventChip(
-                                        task           = task.copy(date = displayDate, time = displayTime, durationMinutes = displayDur),
-                                        widthDp        = dayWidth - 3.dp,
-                                        heightDp       = hDp,
-                                        showHandles    = showHandles,
-                                        isBeingMoved   = isMovingThis,
-                                        isBeingResized = isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM),
-                                        modifier       = Modifier
-                                            .alpha(if (isMovingThis) 0f else 1f)
-                                            .zIndex(if (isThisDragging) 30f else if (showHandles) 15f else 1f)
-                                            .absoluteOffset(x = dayWidth * dayOff + 1.5.dp, y = yDp),
-                                        onTap          = { onTaskTap(task) },
-                                        onHold         = { onTaskHold(task) },
-                                        onMoveStart    = { winPos, grabY -> onMoveStart(task, winPos, grabY) },
-                                        onResizeStart  = { winPos, mode -> onResizeStart(task, winPos, mode) },
-                                        onDragDelta    = onDragDelta,
-                                        onDragEnd      = onDragEnd
-                                    )
+                            for (i in 0..23) {
+                                if (i > 0) {
+                                    drawLine(GridLineColor, Offset(0f, i * dh), Offset(size.width, i * dh), 1.2f)
                                 }
+                                val y = (i + 0.5f) * dh
+                                drawLine(
+                                    GridLineColor.copy(alpha = 0.65f),
+                                    Offset(0f, y),
+                                    Offset(size.width, y),
+                                    1f,
+                                    pathEffect = dashEffect
+                                )
+                            }
+                            for (i in 1..6) {
+                                drawLine(GridLineColor, Offset(i * dw, 0f), Offset(i * dw, size.height), 1.2f)
                             }
                         }
-                    }
 
-                    // ── Active Moving Task Chip on Target Day/Time ──────────
-                    dragState?.let { d ->
-                        if (d.mode == DragMode.MOVE && !d.isOverDrawer && d.snappedDate != null && d.snappedTime != null) {
-                            val dayOff = ChronoUnit.DAYS.between(weekStart, d.snappedDate).toInt()
-                            if (dayOff in 0..6) {
-                                val yFrac = d.snappedTime.hour + d.snappedTime.minute / 60f
-                                val yDp   = HOUR_HEIGHT * yFrac
-                                val hDp   = (HOUR_HEIGHT * d.snappedDuration / 60f).coerceAtLeast(20.dp)
-                                val evtColor = Color(d.task.color)
-                                val endTime = d.snappedTime.plusMinutes(d.snappedDuration.toLong())
+                        // ── Group Scheduled Events into Time-Block Clusters ─
+                        // All overlapping tasks (2, 3, 4, ... N) are stacked visually side-by-side!
+                        // Their left-to-right column order is anchored by originalIndex (not duration/endMin),
+                        // so resizing any task NEVER causes left/right tasks to swap places!
+                        val positionedList = remember(
+                            weekTasks,
+                            weekStart,
+                            dragState?.task?.id,
+                            dragState?.mode,
+                            dragState?.snappedDate,
+                            dragState?.snappedTime,
+                            dragState?.snappedDuration
+                        ) {
+                            weekTasks.mapIndexedNotNull { index, task ->
+                                val isThisDragging = dragState?.task?.id == task.id
+                                val isMovingThis = isThisDragging && dragState?.mode == DragMode.MOVE
+                                val isResizingThis = isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM)
 
-                                Box(
-                                    Modifier
-                                        .zIndex(40f)
-                                        .absoluteOffset(x = dayWidth * dayOff + 1.5.dp, y = yDp)
-                                        .size(dayWidth - 3.dp, hDp)
-                                        .shadow(8.dp, RoundedCornerShape(6.dp))
-                                        .clip(RoundedCornerShape(6.dp))
-                                        .background(CardWhite)
-                                        .background(evtColor.copy(alpha = 0.25f))
-                                        .border(2.dp, evtColor, RoundedCornerShape(6.dp))
-                                ) {
+                                val displayDate = if (isResizingThis) {
+                                    dragState?.snappedDate ?: task.date
+                                } else {
+                                    task.date
+                                } ?: return@mapIndexedNotNull null
+
+                                val displayTime = if (isThisDragging && dragState?.mode == DragMode.RESIZE_TOP) {
+                                    dragState.snappedTime ?: task.time
+                                } else {
+                                    task.time
+                                } ?: return@mapIndexedNotNull null
+
+                                val rawDayOff = ChronoUnit.DAYS.between(weekStart, displayDate).toInt()
+                                if (rawDayOff !in 0..6 && !isMovingThis) return@mapIndexedNotNull null
+                                val displayDur = if (isResizingThis) {
+                                    dragState?.snappedDuration ?: task.durationMinutes
+                                } else {
+                                    task.durationMinutes
+                                }
+
+                                val startMin = displayTime.hour * 60 + displayTime.minute
+                                val endMin = (startMin + displayDur.coerceAtLeast(15)).coerceAtMost(24 * 60)
+
+                                // Use the task's saved interval during active resize so it doesn't jump out of its cluster mid-resize
+                                val savedStartMin = (task.time?.hour ?: displayTime.hour) * 60 + (task.time?.minute ?: displayTime.minute)
+                                val savedEndMin = (savedStartMin + task.durationMinutes.coerceAtLeast(15)).coerceAtMost(24 * 60)
+                                val clusterStart = if (isResizingThis) savedStartMin else startMin
+                                val clusterEnd = if (isResizingThis) savedEndMin else endMin
+
+                                PositionedTask(
+                                    task = task,
+                                    originalIndex = index,
+                                    displayDate = displayDate,
+                                    displayTime = displayTime,
+                                    displayDur = displayDur,
+                                    dayOff = rawDayOff.coerceIn(0, 6),
+                                    startMin = startMin,
+                                    endMin = endMin,
+                                    clusterStartMin = clusterStart,
+                                    clusterEndMin = clusterEnd,
+                                    isMovingThis = isMovingThis,
+                                    isThisDragging = isThisDragging
+                                )
+                            }
+                        }
+
+                        // Build overlapping clusters per day, then order each cluster's columns strictly by originalIndex!
+                        val clusterMetaMap = remember(positionedList) {
+                            val map = HashMap<String, ChipClusterMeta>(positionedList.size)
+                            for (day in 0..6) {
+                                val dayItems = positionedList
+                                    .filter { it.dayOff == day && !it.isMovingThis }
+                                    .sortedBy { it.clusterStartMin }
+
+                                var currentGroup = mutableListOf<PositionedTask>()
+                                var groupMaxEnd = -1
+
+                                fun commitGroup(group: List<PositionedTask>) {
+                                    if (group.isEmpty()) return
+                                    // Sort columns strictly by originalIndex so resizing duration or start time NEVER swaps left & right columns!
+                                    val stableOrdered = group.sortedBy { it.originalIndex }
+                                    val size = stableOrdered.size
+                                    stableOrdered.forEachIndexed { colIdx, pt ->
+                                        map[pt.task.id] = ChipClusterMeta(
+                                            clusterSize = size,
+                                            indexInCluster = colIdx
+                                        )
+                                    }
+                                }
+
+                                for (item in dayItems) {
+                                    if (currentGroup.isEmpty()) {
+                                        currentGroup.add(item)
+                                        groupMaxEnd = item.clusterEndMin
+                                    } else if (item.clusterStartMin < groupMaxEnd) {
+                                        currentGroup.add(item)
+                                        if (item.clusterEndMin > groupMaxEnd) groupMaxEnd = item.clusterEndMin
+                                    } else {
+                                        commitGroup(currentGroup)
+                                        currentGroup = mutableListOf(item)
+                                        groupMaxEnd = item.clusterEndMin
+                                    }
+                                }
+                                commitGroup(currentGroup)
+                            }
+                            map
+                        }
+
+                        // SINGLE FLAT LOOP for ALL CalendarEventChips (visual side-by-side stacking for 1, 2, 3, ... N tasks!)
+                        val availDayW = (dayWidth - 3.dp).coerceAtLeast(10.dp)
+                        positionedList.forEach { pt ->
+                            key(pt.task.id) {
+                                val meta = clusterMetaMap[pt.task.id]
+                                val clusterSize = meta?.clusterSize ?: 1
+                                val idxInCluster = meta?.indexInCluster ?: 0
+
+                                val showHandles = !pt.isMovingThis &&
+                                    ((selectedTaskId == pt.task.id && !pt.isThisDragging) ||
+                                        (pt.isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM)))
+
+                                val yDp = HOUR_HEIGHT * (pt.startMin / 60f)
+                                val hDp = (HOUR_HEIGHT * pt.displayDur / 60f).coerceAtLeast(20.dp)
+
+                                val gap = if (clusterSize <= 2) 1.dp else 0.5.dp
+                                val colW = if (pt.isMovingThis || clusterSize <= 1) {
+                                    availDayW
+                                } else {
+                                    ((availDayW - gap * (clusterSize - 1)) / clusterSize).coerceAtLeast(6.dp)
+                                }
+                                val xOffset = if (pt.isMovingThis || clusterSize <= 1) {
+                                    dayWidth * pt.dayOff + 1.5.dp
+                                } else {
+                                    dayWidth * pt.dayOff + 1.5.dp + (colW + gap) * idxInCluster
+                                }
+                                val chipAlpha = if (pt.isMovingThis) 0f else 1f
+                                val chipZ = when {
+                                    pt.isThisDragging -> 30f
+                                    showHandles -> 18f
+                                    else -> 1f + idxInCluster * 0.1f
+                                }
+
+                                CalendarEventChip(
+                                    task           = pt.task.copy(date = pt.displayDate, time = pt.displayTime, durationMinutes = pt.displayDur),
+                                    widthDp        = colW,
+                                    heightDp       = hDp,
+                                    showHandles    = showHandles,
+                                    isBeingMoved   = pt.isMovingThis,
+                                    isBeingResized = pt.isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM),
+                                    modifier       = Modifier
+                                        .alpha(chipAlpha)
+                                        .zIndex(chipZ)
+                                        .absoluteOffset(x = xOffset, y = yDp),
+                                    onTap          = { onTaskTap(pt.task) },
+                                    onHold         = { onTaskHold(pt.task) },
+                                    onMoveStart    = { winPos, grabY -> onMoveStart(pt.task, winPos, grabY) },
+                                    onResizeStart  = { winPos, mode -> onResizeStart(pt.task, winPos, mode) },
+                                    onDragDelta    = onDragDelta,
+                                    onDragEnd      = onDragEnd
+                                )
+                            }
+                        }
+
+                        // ── Active Moving Task Chip on Target Day/Time ──────
+                        dragState?.let { d ->
+                            if (d.mode == DragMode.MOVE && !d.isOverDrawer && d.snappedDate != null && d.snappedTime != null) {
+                                val dayOff = ChronoUnit.DAYS.between(weekStart, d.snappedDate).toInt()
+                                if (dayOff in 0..6) {
+                                    val yFrac = d.snappedTime.hour + d.snappedTime.minute / 60f
+                                    val yDp   = HOUR_HEIGHT * yFrac
+                                    val hDp   = (HOUR_HEIGHT * d.snappedDuration / 60f).coerceAtLeast(20.dp)
+                                    val evtColor = Color(d.task.color)
+                                    val endTime = d.snappedTime.plusMinutes(d.snappedDuration.toLong())
+
                                     Box(
                                         Modifier
-                                            .fillMaxHeight()
-                                            .width(3.dp)
-                                            .background(evtColor)
-                                    )
-                                    Column(
-                                        Modifier
-                                            .fillMaxSize()
-                                            .padding(start = 5.dp, top = 2.dp, end = 2.dp, bottom = 2.dp)
+                                            .zIndex(40f)
+                                            .absoluteOffset(x = dayWidth * dayOff + 1.5.dp, y = yDp)
+                                            .size(dayWidth - 3.dp, hDp)
+                                            .shadow(8.dp, RoundedCornerShape(6.dp))
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(CardWhite)
+                                            .background(evtColor.copy(alpha = 0.25f))
+                                            .border(2.dp, evtColor, RoundedCornerShape(6.dp))
                                     ) {
-                                        Text(
-                                            text = d.task.title,
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = TextPrimary,
-                                            maxLines = if (hDp > 40.dp) 2 else 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            lineHeight = 11.5.sp
+                                        Box(
+                                            Modifier
+                                                .fillMaxHeight()
+                                                .width(3.dp)
+                                                .background(evtColor)
                                         )
-                                        if (hDp > 28.dp) {
+                                        Column(
+                                            Modifier
+                                                .fillMaxSize()
+                                                .padding(start = 5.dp, top = 2.dp, end = 2.dp, bottom = 2.dp)
+                                        ) {
                                             Text(
-                                                text = "${d.snappedTime.format(FMT_TIME_SHORT)}–${endTime.format(FMT_TIME_SHORT)}",
-                                                fontSize = 8.5.sp,
-                                                fontWeight = FontWeight.Medium,
-                                                color = evtColor,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Clip
+                                                text = d.task.title,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = TextPrimary,
+                                                maxLines = if (hDp > 40.dp) 2 else 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                lineHeight = 11.5.sp
                                             )
+                                            if (hDp > 28.dp) {
+                                                Text(
+                                                    text = "${d.snappedTime.format(FMT_TIME_SHORT)}–${endTime.format(FMT_TIME_SHORT)}",
+                                                    fontSize = 8.5.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = evtColor,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Clip
+                                                )
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    // ── Current-time red line ───────────────────────────────
-                    if (todayIdx in 0..6) {
-                        val now = LocalTime.now()
-                        val yFrac = now.hour + now.minute / 60f
-                        val yDp   = HOUR_HEIGHT * yFrac
-                        Box(
-                            Modifier
-                                .zIndex(14f)
-                                .absoluteOffset(x = dayWidth * todayIdx - 3.5.dp, y = yDp - 4.dp)
-                                .size(8.dp)
-                                .background(DangerRed, CircleShape)
-                                .border(1.dp, Color.White, CircleShape)
-                        )
-                        Box(
-                            Modifier
-                                .zIndex(13f)
-                                .absoluteOffset(x = dayWidth * todayIdx, y = yDp - 1.dp)
-                                .width(dayWidth)
-                                .height(2.dp)
-                                .background(DangerRed)
-                        )
+                        // ── Current-time red line ───────────────────────────
+                        if (todayIdx in 0..6) {
+                            val now = LocalTime.now()
+                            val yFrac = now.hour + now.minute / 60f
+                            val yDp   = HOUR_HEIGHT * yFrac
+                            Box(
+                                Modifier
+                                    .zIndex(14f)
+                                    .absoluteOffset(x = dayWidth * todayIdx - 3.5.dp, y = yDp - 4.dp)
+                                    .size(8.dp)
+                                    .background(DangerRed, CircleShape)
+                                    .border(1.dp, Color.White, CircleShape)
+                            )
+                            Box(
+                                Modifier
+                                    .zIndex(13f)
+                                    .absoluteOffset(x = dayWidth * todayIdx, y = yDp - 1.dp)
+                                    .width(dayWidth)
+                                    .height(2.dp)
+                                    .background(DangerRed)
+                            )
+                        }
                     }
                 }
             }
@@ -1216,18 +1504,25 @@ private fun CalendarEventChip(
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val downPos = down.position
-                    val touchSlop = viewConfiguration.touchSlop
+                    val holdSlop = viewConfiguration.touchSlop * 1.4f
+                    var latestPos = downPos
                     var exceededSlopBeforeHold = false
 
                     val releasedOrMovedEarly = withTimeoutOrNull(HOLD_DURATION_MS) {
                         while (true) {
                             val event = awaitPointerEvent()
+                            // If a 2nd finger touches down (pinch-to-zoom), abort 1-finger tap/hold immediately
+                            if (event.changes.count { it.pressed } > 1) {
+                                exceededSlopBeforeHold = true
+                                return@withTimeoutOrNull false
+                            }
                             val change = event.changes.firstOrNull { it.id == down.id } ?: return@withTimeoutOrNull true
                             if (!change.pressed) {
                                 change.consume()
                                 return@withTimeoutOrNull true
                             }
-                            if ((change.position - downPos).getDistance() > touchSlop) {
+                            latestPos = change.position
+                            if ((change.position - downPos).getDistance() > holdSlop) {
                                 exceededSlopBeforeHold = true
                                 return@withTimeoutOrNull false
                             }
@@ -1239,10 +1534,11 @@ private fun CalendarEventChip(
                     if (releasedOrMovedEarly == true) {
                         updatedOnTap()
                     } else if (releasedOrMovedEarly == null && !exceededSlopBeforeHold) {
+                        // Held for 300ms: immediately activate resize handles!
                         updatedOnHold()
 
                         val coords = chipCoords?.takeIf { it.isAttached }
-                        val startWindowPos = coords?.localToWindow(downPos) ?: downPos
+                        var lastWindowPos = coords?.localToWindow(latestPos) ?: latestPos
                         var moveStarted = false
 
                         while (true) {
@@ -1252,19 +1548,27 @@ private fun CalendarEventChip(
                                 change.consume()
                                 break
                             }
-                            val delta = change.positionChange()
+                            // Consume every move event after 300ms hold so parent verticalScroll never steals the drag!
+                            change.consume()
+
+                            val currentCoords = chipCoords?.takeIf { it.isAttached }
+                            val currentWinPos = currentCoords?.localToWindow(change.position)
+                                ?: (lastWindowPos + change.positionChange())
+                            val winDelta = currentWinPos - lastWindowPos
+
                             if (!moveStarted) {
-                                if ((change.position - downPos).getDistance() > 2f) {
+                                if ((change.position - latestPos).getDistance() > 2f || winDelta.getDistance() > 2f) {
                                     moveStarted = true
-                                    updatedOnMoveStart(startWindowPos, downPos.y)
-                                    val initialDelta = change.position - downPos
-                                    change.consume()
-                                    updatedOnDragDelta(initialDelta)
+                                    updatedOnMoveStart(lastWindowPos, downPos.y)
+                                    lastWindowPos = currentWinPos
+                                    if (winDelta != Offset.Zero) {
+                                        updatedOnDragDelta(winDelta)
+                                    }
                                 }
                             } else {
-                                if (delta != Offset.Zero) {
-                                    change.consume()
-                                    updatedOnDragDelta(delta)
+                                lastWindowPos = currentWinPos
+                                if (winDelta != Offset.Zero) {
+                                    updatedOnDragDelta(winDelta)
                                 }
                             }
                         }
@@ -1623,6 +1927,7 @@ private fun DrawerTaskCard(
     var cardCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
 
     val updatedTask by rememberUpdatedState(task)
+    val updatedOnTap by rememberUpdatedState(onTap)
     val updatedOnMoveStart by rememberUpdatedState(onMoveStart)
     val updatedOnDragDelta by rememberUpdatedState(onDragDelta)
     val updatedOnDragEnd by rememberUpdatedState(onDragEnd)
@@ -1649,22 +1954,59 @@ private fun DrawerTaskCard(
                 }
             }
             .pointerInput(task.id) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { local ->
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val downPos = down.position
+                    val holdSlop = viewConfiguration.touchSlop * 1.4f
+                    var latestPos = downPos
+                    var exceededSlopBeforeHold = false
+
+                    val releasedOrMovedEarly = withTimeoutOrNull(HOLD_DURATION_MS) {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: return@withTimeoutOrNull true
+                            if (!change.pressed) {
+                                change.consume()
+                                return@withTimeoutOrNull true
+                            }
+                            latestPos = change.position
+                            if ((change.position - downPos).getDistance() > holdSlop) {
+                                exceededSlopBeforeHold = true
+                                return@withTimeoutOrNull false
+                            }
+                        }
+                        @Suppress("UNREACHABLE_CODE")
+                        false
+                    }
+
+                    if (releasedOrMovedEarly == true) {
+                        updatedOnTap()
+                    } else if (releasedOrMovedEarly == null && !exceededSlopBeforeHold) {
                         val coords = cardCoords?.takeIf { it.isAttached }
-                        val winPos = coords?.localToWindow(local) ?: local
-                        updatedOnMoveStart(updatedTask, winPos)
-                    },
-                    onDrag = { change, amount ->
-                        change.consume()
-                        updatedOnDragDelta(amount)
-                    },
-                    onDragEnd = { updatedOnDragEnd() },
-                    onDragCancel = { updatedOnDragEnd() }
-                )
-            }
-            .pointerInput(task.id) {
-                detectTapGestures(onTap = { onTap() })
+                        var lastWinPos = coords?.localToWindow(latestPos) ?: latestPos
+                        updatedOnMoveStart(updatedTask, lastWinPos)
+
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) {
+                                change.consume()
+                                break
+                            }
+                            change.consume()
+                            val curCoords = cardCoords?.takeIf { it.isAttached }
+                            val curWin = curCoords?.localToWindow(change.position)
+                                ?: (lastWinPos + change.positionChange())
+                            val delta = curWin - lastWinPos
+                            lastWinPos = curWin
+                            if (delta != Offset.Zero) {
+                                updatedOnDragDelta(delta)
+                            }
+                        }
+
+                        updatedOnDragEnd()
+                    }
+                }
             }
             .padding(start = 10.dp, end = 6.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically
