@@ -47,6 +47,8 @@ import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.LineHeightStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.*
@@ -951,15 +953,20 @@ internal fun CalendarWeeklyPager(
                                 verticalArrangement = Arrangement.Center
                             ) {
                                 Text(
-                                    date.dayOfWeek.name.take(3),
-                                    fontSize = 10.sp,
-                                    fontWeight = if (isToday) FontWeight.Bold else FontWeight.SemiBold,
-                                    color = if (isToday) BrandPrimary else TextSecondary
+                                    text = date.dayOfWeek.name.take(3),
+                                    style = TextStyle(
+                                        fontSize = 10.sp,
+                                        lineHeight = 12.sp,
+                                        fontWeight = if (isToday) FontWeight.Bold else FontWeight.SemiBold,
+                                        color = if (isToday) BrandPrimary else TextSecondary,
+                                        textAlign = TextAlign.Center,
+                                        platformStyle = PlatformTextStyle(includeFontPadding = false)
+                                    )
                                 )
-                                Spacer(Modifier.height(2.dp))
+                                Spacer(Modifier.height(3.dp))
                                 Box(
                                     Modifier
-                                        .size(26.dp)
+                                        .size(28.dp)
                                         .background(
                                             if (isToday) BrandPrimary else Color.Transparent,
                                             CircleShape
@@ -967,10 +974,19 @@ internal fun CalendarWeeklyPager(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Text(
-                                        date.dayOfMonth.toString(),
-                                        fontSize = 12.5.sp,
-                                        fontWeight = if (isToday) FontWeight.Bold else FontWeight.SemiBold,
-                                        color = if (isToday) Color.White else TextPrimary
+                                        text = date.dayOfMonth.toString(),
+                                        style = TextStyle(
+                                            fontSize = 13.sp,
+                                            lineHeight = 13.sp,
+                                            fontWeight = if (isToday) FontWeight.Bold else FontWeight.SemiBold,
+                                            color = if (isToday) Color.White else TextPrimary,
+                                            textAlign = TextAlign.Center,
+                                            platformStyle = PlatformTextStyle(includeFontPadding = false),
+                                            lineHeightStyle = LineHeightStyle(
+                                                alignment = LineHeightStyle.Alignment.Center,
+                                                trim = LineHeightStyle.Trim.Both
+                                            )
+                                        )
                                     )
                                 }
                             }
