@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Calendar outline -->
+    <path
+        android:pathData="M40,34 h28 a8,8 0 0 1 8,8 v34 a8,8 0 0 1 -8,8 h-28 a8,8 0 0 1 -8,-8 v-34 a8,8 0 0 1 8,-8 z"
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6" />
+
+    <!-- Hangers -->
+    <path
+        android:pathData="M44,27 L44,38"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M64,27 L64,38"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round" />
+
+    <!-- Header divider -->
+    <path
+        android:pathData="M33,50 L75,50"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="5" />
+
+    <!-- Checkmark -->
+    <path
+        android:pathData="M40,67 L47,74 L60,58"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>
