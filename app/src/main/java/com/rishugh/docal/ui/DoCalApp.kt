@@ -129,6 +129,7 @@ internal enum class DragMode { MOVE, RESIZE_TOP, RESIZE_BOTTOM }
 
 @Immutable
 private data class PositionedTask(
+    val key: String,
     val task: Task,
     val originalIndex: Int,
     val displayDate: LocalDate,
@@ -140,7 +141,11 @@ private data class PositionedTask(
     val clusterStartMin: Int,
     val clusterEndMin: Int,
     val isMovingThis: Boolean,
-    val isThisDragging: Boolean
+    val isThisDragging: Boolean,
+    val isContinuation: Boolean,
+    val isFirstSegment: Boolean,
+    val isFinalSegment: Boolean,
+    val moveShiftMinutes: Int
 )
 
 @Immutable
@@ -162,6 +167,7 @@ internal data class DragState(
     val originDate: LocalDate? = task.date,
     val originTime: LocalTime? = task.time,
     val originDuration: Int = task.durationMinutes,
+    val moveShiftMinutes: Int = 0,
     val fromDrawer: Boolean = task.date == null,
     val isOverDrawer: Boolean = task.date == null
 )
@@ -256,6 +262,16 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
         return currentMonday.plusDays(dayIdx.toLong()) to LocalTime.of(h, m)
     }
 
+    // Converts the snapped chip-top position back into the task's real start,
+    // accounting for how far into a multi-day task the grabbed segment begins.
+    fun resolveMoveStart(gridDate: LocalDate, gridTime: LocalTime, shiftMinutes: Int): Pair<LocalDate, LocalTime> {
+        val dayOff = ChronoUnit.DAYS.between(weekStart, gridDate).toInt()
+        val totalMin = dayOff * 24 * 60 + gridTime.hour * 60 + gridTime.minute - shiftMinutes
+        val newDayOff = Math.floorDiv(totalMin, 24 * 60)
+        val newMin = Math.floorMod(totalMin, 24 * 60)
+        return weekStart.plusDays(newDayOff.toLong()) to LocalTime.of(newMin / 60, newMin % 60)
+    }
+
     // ── Smooth Google Calendar-Style Edge Week Switching & Vertical/Horizontal Auto-Scroll ──
     val isDraggingMove = drag?.mode == DragMode.MOVE && drag?.isOverDrawer == false
     LaunchedEffect(isDraggingMove) {
@@ -330,10 +346,10 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
 
                         val latest = drag ?: break
                         val (newDate, newTime) = snapToGrid(latest.windowPos, latest.grabOffsetY, targetMonday)
-                        drag = latest.copy(
-                            snappedDate = newDate ?: latest.snappedDate,
-                            snappedTime = newTime ?: latest.snappedTime
-                        )
+                        if (newDate != null && newTime != null) {
+                            val (sd, st) = resolveMoveStart(newDate, newTime, latest.moveShiftMinutes)
+                            drag = latest.copy(snappedDate = sd, snappedTime = st)
+                        }
                     }
                 } else {
                     lastEdgeDir = 0
@@ -343,7 +359,8 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                 if (didScrollOrPan) {
                     val (nd, nt) = snapToGrid(current.windowPos, current.grabOffsetY)
                     if (nd != null && nt != null) {
-                        drag = current.copy(snappedDate = nd, snappedTime = nt)
+                        val (sd, st) = resolveMoveStart(nd, nt, current.moveShiftMinutes)
+                        drag = current.copy(snappedDate = sd, snappedTime = st)
                     }
                 }
             }
@@ -351,7 +368,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
     }
 
     // ── Drag Callbacks ──────────────────────────────────────────────────────
-    val onMoveStart: (Task, Offset, Float, Boolean) -> Unit = { task, windowPos, grabOffsetY, fromDrawer ->
+    val onMoveStart: (Task, Offset, Float, Boolean, Int) -> Unit = { task, windowPos, grabOffsetY, fromDrawer, moveShiftMinutes ->
         dismissKeyboard()
         if (!fromDrawer) {
             viewModel.selectTask(task.id)
@@ -373,6 +390,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
             originDate = task.date,
             originTime = task.time,
             originDuration = task.durationMinutes,
+            moveShiftMinutes = moveShiftMinutes,
             fromDrawer = fromDrawer,
             isOverDrawer = fromDrawer && isDrawerOpen
         )
@@ -446,8 +464,11 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                             viewModel.closeDrawer()
                         }
                         val (gridDate, gridTime) = snapToGrid(newPos, d.grabOffsetY)
-                        val nextDate = gridDate ?: d.snappedDate ?: d.originDate
-                        val nextTime = gridTime ?: d.snappedTime ?: d.originTime
+                        val resolved = if (gridDate != null && gridTime != null) {
+                            resolveMoveStart(gridDate, gridTime, d.moveShiftMinutes)
+                        } else null
+                        val nextDate = resolved?.first ?: d.snappedDate ?: d.originDate
+                        val nextTime = resolved?.second ?: d.snappedTime ?: d.originTime
                         if (nextDate != d.snappedDate || nextTime != d.snappedTime) {
                             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                         }
@@ -464,8 +485,8 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                     val totalDeltaY = newPos.y - d.startWindowPos.y
                     val deltaMin = (totalDeltaY / hourPx * 60f).roundToInt()
                     val rawDuration = d.originDuration + deltaMin
-                    val startMin = (d.originTime?.hour ?: 0) * 60 + (d.originTime?.minute ?: 0)
-                    val maxDuration = (24 * 60 - startMin).coerceAtLeast(15)
+                    // Allow tasks to extend past midnight into the next day (up to a full 24h)
+                    val maxDuration = 24 * 60
                     val snapped = ((rawDuration / 15f).roundToInt() * 15).coerceIn(15, maxDuration)
                     if (snapped != d.snappedDuration) {
                         haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -606,7 +627,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                         onSwipeWeek       = { dir ->
                             animateToWeek(weekStart.plusWeeks(dir.toLong()), dir)
                         },
-                        onMoveStart       = { task, pos, grabY -> onMoveStart(task, pos, grabY, false) },
+                        onMoveStart       = { task, pos, grabY, shift -> onMoveStart(task, pos, grabY, false, shift) },
                         onResizeStart     = onResizeStart,
                         onDragDelta       = onDragDelta,
                         onDragEnd         = onDragEnd
@@ -654,7 +675,7 @@ fun DoCalApp(viewModel: TaskViewModel = viewModel()) {
                             dismissKeyboard()
                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                             val halfChipPx = with(density) { (HOUR_HEIGHT * task.durationMinutes / 120f).toPx() }
-                            onMoveStart(task, pos, halfChipPx, true)
+                            onMoveStart(task, pos, halfChipPx, true, 0)
                         },
                         onDragDelta    = onDragDelta,
                         onDragEnd      = onDragEnd,
@@ -888,7 +909,7 @@ internal fun CalendarWeeklyView(
     onTaskTap: (Task) -> Unit,
     onTaskHold: (Task) -> Unit,
     onSwipeWeek: (Int) -> Unit,
-    onMoveStart: (Task, Offset, Float) -> Unit,
+    onMoveStart: (Task, Offset, Float, Int) -> Unit,
     onResizeStart: (Task, Offset, DragMode) -> Unit,
     onDragDelta: (Offset) -> Unit,
     onDragEnd: () -> Unit
@@ -931,9 +952,13 @@ internal fun CalendarWeeklyView(
     val weekTasks = remember(tasks, weekStart, dragState?.task?.id) {
         tasks.filter { task ->
             val d = task.date
-            val isInThisWeek = d != null && !d.isBefore(weekStart) && !d.isAfter(weekEnd)
             val isBeingDraggedFromCalendar = dragState?.task?.id == task.id && d != null
-            isInThisWeek || isBeingDraggedFromCalendar
+            if (d == null) return@filter isBeingDraggedFromCalendar
+            val start = d.atTime(task.time ?: LocalTime.MIDNIGHT)
+            val end = start.plusMinutes(task.durationMinutes.coerceAtLeast(15).toLong())
+            val overlapsWeek = end.isAfter(weekStart.atStartOfDay()) &&
+                start.isBefore(weekEnd.plusDays(1).atStartOfDay())
+            overlapsWeek || isBeingDraggedFromCalendar
         }
     }
 
@@ -1229,54 +1254,76 @@ internal fun CalendarWeeklyView(
                             dragState?.snappedTime,
                             dragState?.snappedDuration
                         ) {
-                            weekTasks.mapIndexedNotNull { index, task ->
-                                val isThisDragging = dragState?.task?.id == task.id
-                                val isMovingThis = isThisDragging && dragState?.mode == DragMode.MOVE
-                                val isResizingThis = isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM)
+                            buildList {
+                                weekTasks.forEachIndexed { index, task ->
+                                    val isThisDragging = dragState?.task?.id == task.id
+                                    val isMovingThis = isThisDragging && dragState?.mode == DragMode.MOVE
+                                    val isResizingThis = isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM)
 
-                                val displayDate = if (isResizingThis) {
-                                    dragState?.snappedDate ?: task.date
-                                } else {
-                                    task.date
-                                } ?: return@mapIndexedNotNull null
+                                    val displayDate = if (isResizingThis) {
+                                        dragState?.snappedDate ?: task.date
+                                    } else {
+                                        task.date
+                                    } ?: return@forEachIndexed
 
-                                val displayTime = if (isThisDragging && dragState?.mode == DragMode.RESIZE_TOP) {
-                                    dragState.snappedTime ?: task.time
-                                } else {
-                                    task.time
-                                } ?: return@mapIndexedNotNull null
+                                    val displayTime = if (isThisDragging && dragState?.mode == DragMode.RESIZE_TOP) {
+                                        dragState.snappedTime ?: task.time
+                                    } else {
+                                        task.time
+                                    } ?: return@forEachIndexed
 
-                                val rawDayOff = ChronoUnit.DAYS.between(weekStart, displayDate).toInt()
-                                if (rawDayOff !in 0..6 && !isMovingThis) return@mapIndexedNotNull null
-                                val displayDur = if (isResizingThis) {
-                                    dragState?.snappedDuration ?: task.durationMinutes
-                                } else {
-                                    task.durationMinutes
+                                    val displayDur = if (isResizingThis) {
+                                        dragState?.snappedDuration ?: task.durationMinutes
+                                    } else {
+                                        task.durationMinutes
+                                    }
+                                    val duration = displayDur.coerceAtLeast(15)
+                                    val startDayOff = ChronoUnit.DAYS.between(weekStart, displayDate).toInt()
+                                    val startMinOfDay = displayTime.hour * 60 + displayTime.minute
+                                    val absEndMin = startMinOfDay + duration
+
+                                    // Use the task's saved interval during active resize so it doesn't jump out of its cluster mid-resize
+                                    val savedStartMin = (task.time?.hour ?: displayTime.hour) * 60 + (task.time?.minute ?: displayTime.minute)
+                                    val savedAbsEndMin = savedStartMin + task.durationMinutes.coerceAtLeast(15)
+
+                                    // Emit one chip per calendar day the task spans so it visually continues past midnight!
+                                    val lastDayOffset = (absEndMin - 1) / (24 * 60)
+                                    var dayOffset = 0
+                                    while (dayOffset * 24 * 60 < absEndMin) {
+                                        val dayBase = dayOffset * 24 * 60
+                                        val segStartMin = (startMinOfDay - dayBase).coerceAtLeast(0)
+                                        val segEndMin = (absEndMin - dayBase).coerceAtMost(24 * 60)
+                                        val segDur = segEndMin - segStartMin
+                                        val segDayOff = startDayOff + dayOffset
+                                        if (segDur > 0 && segDayOff in 0..6) {
+                                            val savedSegStart = (savedStartMin - dayBase).coerceIn(0, 24 * 60)
+                                            val savedSegEnd = (savedAbsEndMin - dayBase).coerceIn(0, 24 * 60)
+                                            val useSaved = isResizingThis && savedSegEnd > savedSegStart
+                                            add(
+                                                PositionedTask(
+                                                    key = "${task.id}#$dayOffset",
+                                                    task = task,
+                                                    originalIndex = index,
+                                                    displayDate = displayDate.plusDays(dayOffset.toLong()),
+                                                    displayTime = if (dayOffset == 0) displayTime else LocalTime.MIDNIGHT,
+                                                    displayDur = segDur,
+                                                    dayOff = segDayOff,
+                                                    startMin = segStartMin,
+                                                    endMin = segEndMin,
+                                                    clusterStartMin = if (useSaved) savedSegStart else segStartMin,
+                                                    clusterEndMin = if (useSaved) savedSegEnd else segEndMin,
+                                                    isMovingThis = isMovingThis,
+                                                    isThisDragging = isThisDragging,
+                                                    isContinuation = dayOffset > 0,
+                                                    isFirstSegment = dayOffset == 0,
+                                                    isFinalSegment = dayOffset == lastDayOffset,
+                                                    moveShiftMinutes = dayOffset * 24 * 60 + segStartMin - (displayTime.hour * 60 + displayTime.minute)
+                                                )
+                                            )
+                                        }
+                                        dayOffset++
+                                    }
                                 }
-
-                                val startMin = displayTime.hour * 60 + displayTime.minute
-                                val endMin = (startMin + displayDur.coerceAtLeast(15)).coerceAtMost(24 * 60)
-
-                                // Use the task's saved interval during active resize so it doesn't jump out of its cluster mid-resize
-                                val savedStartMin = (task.time?.hour ?: displayTime.hour) * 60 + (task.time?.minute ?: displayTime.minute)
-                                val savedEndMin = (savedStartMin + task.durationMinutes.coerceAtLeast(15)).coerceAtMost(24 * 60)
-                                val clusterStart = if (isResizingThis) savedStartMin else startMin
-                                val clusterEnd = if (isResizingThis) savedEndMin else endMin
-
-                                PositionedTask(
-                                    task = task,
-                                    originalIndex = index,
-                                    displayDate = displayDate,
-                                    displayTime = displayTime,
-                                    displayDur = displayDur,
-                                    dayOff = rawDayOff.coerceIn(0, 6),
-                                    startMin = startMin,
-                                    endMin = endMin,
-                                    clusterStartMin = clusterStart,
-                                    clusterEndMin = clusterEnd,
-                                    isMovingThis = isMovingThis,
-                                    isThisDragging = isThisDragging
-                                )
                             }
                         }
 
@@ -1297,7 +1344,7 @@ internal fun CalendarWeeklyView(
                                     val stableOrdered = group.sortedBy { it.originalIndex }
                                     val size = stableOrdered.size
                                     stableOrdered.forEachIndexed { colIdx, pt ->
-                                        map[pt.task.id] = ChipClusterMeta(
+                                        map[pt.key] = ChipClusterMeta(
                                             clusterSize = size,
                                             indexInCluster = colIdx
                                         )
@@ -1325,14 +1372,16 @@ internal fun CalendarWeeklyView(
                         // SINGLE FLAT LOOP for ALL CalendarEventChips (visual side-by-side stacking for 1, 2, 3, ... N tasks!)
                         val availDayW = (dayWidth - 3.dp).coerceAtLeast(10.dp)
                         positionedList.forEach { pt ->
-                            key(pt.task.id) {
-                                val meta = clusterMetaMap[pt.task.id]
+                            key(pt.key) {
+                                val meta = clusterMetaMap[pt.key]
                                 val clusterSize = meta?.clusterSize ?: 1
                                 val idxInCluster = meta?.indexInCluster ?: 0
 
                                 val showHandles = !pt.isMovingThis &&
                                     ((selectedTaskId == pt.task.id && !pt.isThisDragging) ||
                                         (pt.isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM)))
+                                val showTopHandle = showHandles && pt.isFirstSegment
+                                val showBottomHandle = showHandles && pt.isFinalSegment
 
                                 val yDp = HOUR_HEIGHT * (pt.startMin / 60f)
                                 val hDp = (HOUR_HEIGHT * pt.displayDur / 60f).coerceAtLeast(20.dp)
@@ -1360,15 +1409,19 @@ internal fun CalendarWeeklyView(
                                     widthDp        = colW,
                                     heightDp       = hDp,
                                     showHandles    = showHandles,
+                                    showTopHandle  = showTopHandle,
+                                    showBottomHandle = showBottomHandle,
+                                    allowMove      = true,
                                     isBeingMoved   = pt.isMovingThis,
                                     isBeingResized = pt.isThisDragging && (dragState?.mode == DragMode.RESIZE_TOP || dragState?.mode == DragMode.RESIZE_BOTTOM),
+                                    isContinuation = pt.isContinuation,
                                     modifier       = Modifier
                                         .alpha(chipAlpha)
                                         .zIndex(chipZ)
                                         .absoluteOffset(x = xOffset, y = yDp),
                                     onTap          = { onTaskTap(pt.task) },
                                     onHold         = { onTaskHold(pt.task) },
-                                    onMoveStart    = { winPos, grabY -> onMoveStart(pt.task, winPos, grabY) },
+                                    onMoveStart    = { winPos, grabY -> onMoveStart(pt.task, winPos, grabY, pt.moveShiftMinutes) },
                                     onResizeStart  = { winPos, mode -> onResizeStart(pt.task, winPos, mode) },
                                     onDragDelta    = onDragDelta,
                                     onDragEnd      = onDragEnd
@@ -1379,13 +1432,25 @@ internal fun CalendarWeeklyView(
                         // ── Active Moving Task Chip on Target Day/Time ──────
                         dragState?.let { d ->
                             if (d.mode == DragMode.MOVE && !d.isOverDrawer && d.snappedDate != null && d.snappedTime != null) {
-                                val dayOff = ChronoUnit.DAYS.between(weekStart, d.snappedDate).toInt()
-                                if (dayOff in 0..6) {
-                                    val yFrac = d.snappedTime.hour + d.snappedTime.minute / 60f
-                                    val yDp   = HOUR_HEIGHT * yFrac
-                                    val hDp   = (HOUR_HEIGHT * d.snappedDuration / 60f).coerceAtLeast(20.dp)
-                                    val evtColor = Color(d.task.color)
-                                    val endTime = d.snappedTime.plusMinutes(d.snappedDuration.toLong())
+                                val startDayOff = ChronoUnit.DAYS.between(weekStart, d.snappedDate).toInt()
+                                val startMin = d.snappedTime.hour * 60 + d.snappedTime.minute
+                                val absEndMin = startMin + d.snappedDuration.coerceAtLeast(15)
+                                val lastDayOffset = (absEndMin - 1) / (24 * 60)
+                                val evtColor = Color(d.task.color)
+
+                                for (dayOffset in 0..lastDayOffset) {
+                                    val dayOff = startDayOff + dayOffset
+                                    if (dayOff !in 0..6) continue
+                                    val dayBase = dayOffset * 24 * 60
+                                    val segStartMin = (startMin - dayBase).coerceAtLeast(0)
+                                    val segEndMin = (absEndMin - dayBase).coerceAtMost(24 * 60)
+                                    val segDur = segEndMin - segStartMin
+                                    if (segDur <= 0) continue
+
+                                    val yDp = HOUR_HEIGHT * (segStartMin / 60f)
+                                    val hDp = (HOUR_HEIGHT * segDur / 60f).coerceAtLeast(20.dp)
+                                    val segTime = LocalTime.of(segStartMin / 60, segStartMin % 60)
+                                    val endTime = segTime.plusMinutes(segDur.toLong())
 
                                     Box(
                                         Modifier
@@ -1420,7 +1485,11 @@ internal fun CalendarWeeklyView(
                                             )
                                             if (hDp > 28.dp) {
                                                 Text(
-                                                    text = "${d.snappedTime.format(FMT_TIME_SHORT)}–${endTime.format(FMT_TIME_SHORT)}",
+                                                    text = if (dayOffset == 0) {
+                                                        "${segTime.format(FMT_TIME_SHORT)}–${endTime.format(FMT_TIME_SHORT)}"
+                                                    } else {
+                                                        "– ${endTime.format(FMT_TIME_AMPM)}"
+                                                    },
                                                     fontSize = 8.5.sp,
                                                     fontWeight = FontWeight.Medium,
                                                     color = evtColor,
@@ -1476,8 +1545,12 @@ private fun CalendarEventChip(
     widthDp: Dp,
     heightDp: Dp,
     showHandles: Boolean,
+    showTopHandle: Boolean = showHandles,
+    showBottomHandle: Boolean = showHandles,
+    allowMove: Boolean = true,
     isBeingMoved: Boolean,
     isBeingResized: Boolean,
+    isContinuation: Boolean = false,
     modifier: Modifier,
     onTap: () -> Unit,
     onHold: () -> Unit,
@@ -1557,7 +1630,7 @@ private fun CalendarEventChip(
                             val winDelta = currentWinPos - lastWindowPos
 
                             if (!moveStarted) {
-                                if ((change.position - latestPos).getDistance() > 2f || winDelta.getDistance() > 2f) {
+                                if (allowMove && ((change.position - latestPos).getDistance() > 2f || winDelta.getDistance() > 2f)) {
                                     moveStarted = true
                                     updatedOnMoveStart(lastWindowPos, downPos.y)
                                     lastWindowPos = currentWinPos
@@ -1625,10 +1698,11 @@ private fun CalendarEventChip(
                 if (heightDp > 28.dp && task.time != null) {
                     val endTime = task.time.plusMinutes(task.durationMinutes.toLong())
                     Text(
-                        text = if (isBeingMoved || isBeingResized) {
-                            "${task.time.format(FMT_TIME_SHORT)}–${endTime.format(FMT_TIME_SHORT)}"
-                        } else {
-                            task.time.format(FMT_TIME_AMPM)
+                        text = when {
+                            isBeingMoved || isBeingResized ->
+                                "${task.time.format(FMT_TIME_SHORT)}–${endTime.format(FMT_TIME_SHORT)}"
+                            isContinuation -> "– ${endTime.format(FMT_TIME_AMPM)}"
+                            else -> task.time.format(FMT_TIME_AMPM)
                         },
                         fontSize = 8.5.sp,
                         fontWeight = FontWeight.Medium,
@@ -1641,7 +1715,7 @@ private fun CalendarEventChip(
         }
 
         // ── Top & Bottom Resize Handles (Shown after 300ms hold!) ───────────
-        if (showHandles) {
+        if (showTopHandle) {
             var lastTopWinPos by remember { mutableStateOf(Offset.Zero) }
             Box(
                 Modifier
@@ -1685,7 +1759,9 @@ private fun CalendarEventChip(
                     Box(Modifier.size(8.dp, 1.5.dp).background(Color.White, RoundedCornerShape(1.dp)))
                 }
             }
+        }
 
+        if (showBottomHandle) {
             var lastBotWinPos by remember { mutableStateOf(Offset.Zero) }
             Box(
                 Modifier
