@@ -5,36 +5,61 @@
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Calendar outline -->
-    <path
-        android:pathData="M40,34 h28 a8,8 0 0 1 8,8 v34 a8,8 0 0 1 -8,8 h-28 a8,8 0 0 1 -8,-8 v-34 a8,8 0 0 1 8,-8 z"
-        android:fillColor="#00000000"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="6" />
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.85"
+        android:scaleY="0.85">
 
-    <!-- Hangers -->
-    <path
-        android:pathData="M44,27 L44,38"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="6"
-        android:strokeLineCap="round" />
-    <path
-        android:pathData="M64,27 L64,38"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="6"
-        android:strokeLineCap="round" />
+        <!-- Calendar card outline -->
+        <path
+            android:pathData="M41,32 h26 a10,10 0 0 1 10,10 v28 a10,10 0 0 1 -10,10 h-26 a10,10 0 0 1 -10,-10 v-28 a10,10 0 0 1 10,-10 z"
+            android:fillColor="#00000000"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="6" />
 
-    <!-- Header divider -->
-    <path
-        android:pathData="M33,50 L75,50"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="5" />
+        <!-- Binder rings -->
+        <path
+            android:pathData="M40,24 L40,36"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="6"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M68,24 L68,36"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="6"
+            android:strokeLineCap="round" />
 
-    <!-- Checkmark -->
-    <path
-        android:pathData="M40,67 L47,74 L60,58"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="6"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
+        <!-- Header divider -->
+        <path
+            android:pathData="M38,47 L70,47"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="5"
+            android:strokeLineCap="round" />
+
+        <!-- Done row: bold check + line -->
+        <path
+            android:pathData="M36,58 L40,62 L46,53"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="6"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M52,58 L70,58"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="5"
+            android:strokeLineCap="round" />
+
+        <!-- Pending row: circle + line -->
+        <path
+            android:pathData="M40,72 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="5"
+            android:fillColor="#00000000" />
+        <path
+            android:pathData="M52,72 L70,72"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="5"
+            android:strokeLineCap="round" />
+    </group>
 </vector>

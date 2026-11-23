@@ -1,46 +1,98 @@
 <?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Left calendar hanger -->
-    <path
-        android:pathData="M44,27 L44,37"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="5"
-        android:strokeLineCap="round" />
-    <!-- Right calendar hanger -->
-    <path
-        android:pathData="M64,27 L64,37"
-        android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="5"
-        android:strokeLineCap="round" />
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.85"
+        android:scaleY="0.85">
 
-    <!-- Calendar body -->
-    <path
-        android:pathData="M40,32 h28 a9,9 0 0 1 9,9 v35 a9,9 0 0 1 -9,9 h-28 a9,9 0 0 1 -9,-9 v-35 a9,9 0 0 1 9,-9 z"
-        android:fillColor="#FFFFFFFF" />
+        <!-- Soft drop shadow under the calendar card -->
+        <path
+            android:fillColor="#471E1B4B"
+            android:pathData="M41,35 h26 a10,10 0 0 1 10,10 v28 a10,10 0 0 1 -10,10 h-26 a10,10 0 0 1 -10,-10 v-28 a10,10 0 0 1 10,-10 z" />
 
-    <!-- Calendar header band -->
-    <path
-        android:pathData="M31,48 v-7 a9,9 0 0 1 9,-9 h28 a9,9 0 0 1 9,9 v7 z"
-        android:fillColor="#FF4F46E5" />
+        <!-- Calendar card: subtle white -> indigo-tinted white vertical gradient -->
+        <path android:pathData="M41,32 h26 a10,10 0 0 1 10,10 v28 a10,10 0 0 1 -10,10 h-26 a10,10 0 0 1 -10,-10 v-28 a10,10 0 0 1 10,-10 z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:startX="54"
+                    android:startY="32"
+                    android:endX="54"
+                    android:endY="80"
+                    android:type="linear">
+                    <item
+                        android:color="#FFFFFFFF"
+                        android:offset="0.0" />
+                    <item
+                        android:color="#FFEEF2FF"
+                        android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
 
-    <!-- Header dots -->
-    <path
-        android:pathData="M40,40 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0"
-        android:fillColor="#FFFFFFFF" />
-    <path
-        android:pathData="M68,40 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0"
-        android:fillColor="#FFFFFFFF" />
+        <!-- Indigo header band with rounded top corners -->
+        <path android:pathData="M31,46 v-4 a10,10 0 0 1 10,-10 h26 a10,10 0 0 1 10,10 v4 z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:startX="54"
+                    android:startY="32"
+                    android:endX="54"
+                    android:endY="46"
+                    android:type="linear">
+                    <item
+                        android:color="#FF4F46E5"
+                        android:offset="0.0" />
+                    <item
+                        android:color="#FF4338CA"
+                        android:offset="1.0" />
+                </gradient>
+            </aapt:attr>
+        </path>
 
-    <!-- Completion checkmark -->
-    <path
-        android:pathData="M40,66 L47,73 L59,57"
-        android:strokeColor="#FF4F46E5"
-        android:strokeWidth="6.5"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round" />
+        <!-- Binder rings piercing the header -->
+        <path
+            android:pathData="M40,25 L40,37"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="4.5"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M68,25 L68,37"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="4.5"
+            android:strokeLineCap="round" />
+
+        <!-- Row 1: completed task (filled check circle + line) -->
+        <path
+            android:fillColor="#FF4F46E5"
+            android:pathData="M40,56 m-6.5,0 a6.5,6.5 0 1,0 13,0 a6.5,6.5 0 1,0 -13,0" />
+        <path
+            android:pathData="M37.3,56.4 L39.5,58.6 L43.6,53.8"
+            android:strokeColor="#FFFFFFFF"
+            android:strokeWidth="2.2"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round" />
+        <path
+            android:pathData="M51,56 L71,56"
+            android:strokeColor="#FF94A3B8"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round" />
+
+        <!-- Row 2: pending task (outlined circle + lighter line) -->
+        <path
+            android:pathData="M40,71 m-5.5,0 a5.5,5.5 0 1,0 11,0 a5.5,5.5 0 1,0 -11,0"
+            android:strokeColor="#FF94A3B8"
+            android:strokeWidth="2.2"
+            android:fillColor="#00000000" />
+        <path
+            android:pathData="M51,71 L71,71"
+            android:strokeColor="#FFCBD5E1"
+            android:strokeWidth="2.5"
+            android:strokeLineCap="round" />
+    </group>
 </vector>
